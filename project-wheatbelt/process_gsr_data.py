@@ -10,6 +10,7 @@ Can also display information on model grid and sample sizes.
 """
 
 import geopandas as gp
+import logging
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -18,11 +19,12 @@ import xarray as xr
 from unseen.spatial_selection import select_shapefile_regions
 from unseen.time_utils import str_to_cftime
 
+logging.basicConfig(level=logging.INFO)
 # The data and figures subdirs on your system
 home = Path("/g/data/xv83/unseen-projects/outputs/wheatbelt")
-
 data_dir = home / "data/"
 fig_dir = home / "figures/"
+# fig_dir = home / "figures_detrended/"
 
 shapefile = home / "shapefiles/australia.shp"
 regions = ["WA", "SA"]
@@ -110,9 +112,7 @@ def convert_to_quantiles(data, q=3, core_dim="time", quantile_dims="time", bins=
     unique_labels = unique_labels[~np.isnan(unique_labels)]
     assert np.all(np.isin(unique_labels, bin_labels)), "Some quantile labels missing"
     # Assert no unexpected quantile labels are present in the output data
-    assert np.all(
-        np.isin(bin_labels, unique_labels)
-    ), "Unexpected quantile labels present"
+    assert np.all(np.isin(bin_labels, unique_labels)), "Unexpected quantile labels present"
     return df
 
 
@@ -146,11 +146,9 @@ def CAFE_datasets_merge_init_months(files):
             ds.coords["lat"] = ds.lat.round(3)
 
         # Shift init_date coordinate to correct month (not YE-DEC)
-        month_offset = init_month - ds.init_date.dt.month
+        month_offset = (init_month - ds.init_date.dt.month) - 1
 
-        assert all(
-            month_offset == month_offset[0].item()
-        ), "Inconsistent init months in CAFE data"
+        assert all(month_offset == month_offset[0].item()), "Inconsistent init months in CAFE data"
 
         month_offset = month_offset[0].item()
         ds["init_date"] = ds.init_date.get_index("init_date").shift(month_offset, "MS")
@@ -169,7 +167,7 @@ def CAFE_datasets_merge_init_months(files):
     return ds
 
 
-def gsr_data_regions(model, quantile_var="tercile"):
+def gsr_data_regions(model, quantile_var="tercile", detrend=0):
     """Get dataset of Apr-Oct rainfall and quantiles in both regions.
 
     Parameters
@@ -187,8 +185,8 @@ def gsr_data_regions(model, quantile_var="tercile"):
     """
 
     if model == "AGCD":
+        model += "_1901-2025"
         core_dim, quantile_dims = ["time"], "time"
-        model += "-mon"  # Open monthly AGCD data
     else:
         # dim to iterate over when calculating events
         core_dim = ["lead_time"]
@@ -205,17 +203,22 @@ def gsr_data_regions(model, quantile_var="tercile"):
     else:
 
         ds_region_list = [
-            xr.open_mfdataset(f).assign_coords(dict(x=n))
-            for f, n in zip(files, regions)
+            xr.open_mfdataset(f[0]).assign_coords(dict(x=n)) for f, n in zip(files, regions)
         ]
 
     if "AGCD" not in model:
-        # Limit lead times to first 10 for DCPP models (because EC-Earth3 sometimes has 11)
-        ds_region_list = [ds.isel(lead_time=slice(0, 10)) for ds in ds_region_list]
-        # Drop lead times with all NaNs (NorCPM1 has an extra lead times with all NaNs?)
-        ds_region_list = [ds.dropna("lead_time", how="all") for ds in ds_region_list]
 
+        # Limit lead times to first 10 for DCPP models (because EC-Earth3 &NorCPM sometimes has 11)
+        ds_region_list = [ds.isel(lead_time=slice(0, 10)) for ds in ds_region_list]
+        # Drop lead times with all NaNs
+        ds_region_list = [ds.dropna("lead_time", how="all") for ds in ds_region_list]
     ds = xr.concat(ds_region_list, dim="x")
+
+    if "AGCD" in model and detrend:
+        trend = ds.pr.polyfit(dim="time", deg=1)
+        trend_line = xr.polyval(ds["time"], trend["polyfit_coefficients"])
+        trend_line_anomaly = trend_line - trend_line.isel({"time": 0})
+        ds = ds - trend_line_anomaly
 
     for dim in ds[data_var].dims:
         ds[data_var] = ds[data_var].dropna(dim, how="all")
@@ -257,7 +260,7 @@ def gsr_data_aus_AGCD(quantile_var="tercile"):
     ds : xr.Dataset
         Dataset containing GSR rainfall and quantile variable over Australia.
     """
-
+    # !!! Update file times when available
     file_data = data_dir / "growing-season-pr_AGCD-monthly_1900-2022_AMJJASO_gn.nc"
 
     ds = xr.open_dataset(file_data)[data_var]
@@ -362,7 +365,7 @@ def gsr_data_aus_DCPP(model, quantile_var="tercile"):
     return ds
 
 
-def print_model_resolutions():
+def log_model_resolutions():
     """Print spatial resolutions for each model in the regions.
 
     grid: average distance between grid cells (degrees) at the equator
@@ -380,7 +383,7 @@ def print_model_resolutions():
         return lat_res, lon_res
 
     # Print table header
-    print(f"{'Model':15s} {'grid (lat x lon)'} nominal_res atmos_model")
+    logging.info(f"{'Model':15s} {'grid (lat x lon)'} nominal_res atmos_model")
 
     # Iterate through models: load dataset, print grid spacing and file metadata
     for m in models:
@@ -401,10 +404,10 @@ def print_model_resolutions():
             source = source.split("atmos: ")[1].split("\n")[0].strip()
 
         # Print the output as 'grid:, nominal res, atmos grid'
-        print(f"{m:<16s} {lat_res:.3f} x {lon_res:.3f}   {nominal_res:<11} {source}")
+        logging.info(f"{m:<16s} {lat_res:.3f} x {lon_res:.3f}   {nominal_res:<11} {source}")
 
 
-def print_sample_sizes():
+def log_sample_sizes():
     """Print sample sizes for each dataset."""
 
     # Print table header
@@ -413,11 +416,11 @@ def print_sample_sizes():
     for m in dataset_names:
         ds = gsr_data_regions(m)
         if m == "AGCD":
-            print(f"{m:36s}{ds.time.size:5d}")
+            logging.info(f"{m:36s}{ds.time.size:5d}")
         else:
             n_samples = xr.where(~np.isnan(ds[data_var].isel(x=0)), 1, 0).sum()
             n_samples_est = ds.ensemble.size * ds.init_date.size * ds.lead_time.size
 
-            print(
+            logging.info(
                 f"{m:<16s} {ds.ensemble.size:<6} {ds.lead_time.size:<6} {ds.init_date.size:<6} {n_samples.load().item():<8} {n_samples_est}"
             )

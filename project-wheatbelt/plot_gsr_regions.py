@@ -1,25 +1,36 @@
-"""Plots of low/high growing season rainfall (GSR) in the WA and SA regions."""
+"""Plots of low/high growing season rainfall (GSR) in the WA and SA regions.
 
+Evaluation plots (use raw model data - careful with preprocessing)
+"""
+
+import calendar
 import cmocean
+import logging
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-from matplotlib.colors import BoundaryNorm
+from matplotlib.colors import BoundaryNorm, LinearSegmentedColormap
 from matplotlib.ticker import FixedLocator
 import numpy as np
 import pymannkendall
 import string
 import xarray as xr
 
+from unseen.moments import calc_moments, calc_ci, log_results
+from unseen.independence import run_tests
 from unseen.stability import plot_dist_by_lead, plot_dist_by_time
 from unseen.time_utils import str_to_cftime
 
 from process_gsr_data import (
     dataset_names,
     home,
+    data_dir,
     fig_dir,
     models,
     regions,
     gsr_data_regions,
+    CAFE_datasets_merge_init_months,
+    log_model_resolutions,
+    log_sample_sizes,
 )
 from gsr_events import (
     Events,
@@ -35,6 +46,7 @@ plt.rcParams["font.size"] = 12
 plt.rcParams["savefig.dpi"] = 300
 
 letters = list(string.ascii_lowercase)  # Letters for subplot titles
+logging.basicConfig(level=logging.INFO)
 
 
 def transition_probability_cmap(n_intervals=24):
@@ -52,18 +64,20 @@ def transition_probability_cmap(n_intervals=24):
     norm : matplotlib.colors.BoundaryNorm
         Normalization instance.
     cbar_ticks : array-like
-        Colorbar ticks (%) increments of 1/n_intervals to 0.9.
+        Colorbar ticks (%) increments of 1/n_intervals to 0.66.
     """
 
-    # Format discrete colormap (purple/orange centred on 1/3)
-    # Crop off lower colours so white is ~1/3
-    cmap = cmocean.tools.crop_by_percent(
-        plt.cm.PuOr, 55 - (100 / 3), which="min", N=None
-    )
+    cmap_colors = [(0.0, "orange"), (0.5, "white"), (1, "purple")]
+    cmap = LinearSegmentedColormap.from_list("YlWPu", cmap_colors)
     # Use 1 / discrete intervals for ticks and cbar
     w = 1 / n_intervals
-    cbar_ticks = np.arange(0, 0.9, w) * 100
-    levels = np.arange(w / 2, 0.9, w) * 100  # Edges between colours
+    cbar_ticks = np.arange(0, 0.66, w) * 100
+    levels = np.arange(w / 2, 1, w) * 100  # Edges between colours
+    levels = levels[: len(cbar_ticks)]
+    # # Use if centered on 1/3:
+    # cbar_ticks = np.arange(0, 0.9, w) * 100
+    # levels = np.arange(w / 2, 1, w) * 100  # Edges between colours
+    # levels = levels[:len(cbar_ticks) + 1]
     norm = BoundaryNorm(levels, ncolors=cmap.N, extend="both")
     return cmap, norm, cbar_ticks
 
@@ -94,10 +108,34 @@ def quantile_cmap(return_colors=False):
     cmap = plt.cm.BrBG
     cmap = cmocean.tools.crop_by_percent(cmap, 20, which="min", N=None)
     cmap = cmocean.tools.crop_by_percent(cmap, 20, which="max", N=None)
-
-    cmap = mpl.colors.ListedColormap(colors)
     norm = BoundaryNorm(np.array([0, 1.5, 2.5, 3]), ncolors=cmap.N)
     return cmap, norm
+
+
+def boxplot_show_only_last_outliers(bp):
+    """Show only the min and max outlier."""
+
+    for flier, median in zip(bp["fliers"], bp["medians"]):
+        # x and y coordinates of all computed outliers for the current box
+        x_data = flier.get_xdata()
+        y_data = flier.get_ydata()
+        median = median.get_ydata()
+
+        if len(y_data) > 0:
+            # Find indices of global max and min outliers
+            inds = []
+            # Only get max/min if there is a flier above/below median
+            if (np.max(y_data) > median).any():
+                inds.append(np.argmax(y_data))
+            if (np.min(y_data) < median).any():
+                inds.append(np.argmin(y_data))
+
+            # Collect distinct max and min points
+            keep_indices = list(set(inds))
+
+            # Update the flyer plot data
+            flier.set_xdata(x_data[keep_indices])
+            flier.set_ydata(y_data[keep_indices])
 
 
 def plot_duration_histogram(dv, event, model, time_dim="time", quantile_var="tercile"):
@@ -179,6 +217,57 @@ def plot_duration_histogram(dv, event, model, time_dim="time", quantile_var="ter
     plt.show()
 
 
+def plot_duration_histogram_all_models(x, event, quantile_var="tercile", density=True):
+    """Histogram of event durations (i.e., number of consecutive years).
+
+    Parameters
+    ----------
+    event : Events instance
+        Event properties.
+        Name of the quantile variable to use for event detection.
+    """
+
+    # Lowest number of consecutive years to show on x-axis
+    min_duration = 1
+
+    fig, axes = plt.subplots(5, 2, figsize=(10, 16), sharey=True)
+    axes = axes.flatten()
+    # Downsampled model boxplots (fits all models within each bar)
+    for i, model in enumerate(dataset_names):
+        ax = axes[i]
+        ax.grid(zorder=2)
+        ax.set_axisbelow(True)
+        ds = gsr_data_regions(model).isel(x=x)
+        # Produces n_resamples of obs-sized subsample
+        counts, bins, _ = get_event_duration_counts(
+            event, ds, model, density=density, downsample=False
+        )
+
+        ax.bar(
+            bins[min_duration - 1 : -1],
+            counts[min_duration - 1 :],
+            color="b",
+            edgecolor="k",
+            width=1,
+            alpha=0.75,
+            label=model,
+        )
+        ax.set_title(f"{letters[i]}) {model}: {regions[x]} region", loc="left")
+        ax.set_xlabel(f"Number of consecutive {event.alt_name} {quantile_var} years")
+        ax.set_ylabel("Density" if density else "Count")
+        ax.set_xmargin(1e-3)
+        ax.set_ymargin(0.1)
+        ax.xaxis.set_major_locator(mpl.ticker.MaxNLocator(integer=True))
+        ax.yaxis.set_major_locator(mpl.ticker.MaxNLocator(integer=True))
+
+    plt.tight_layout()
+    outfile = f"{fig_dir}/{event.type}/{event.type}_duration_histogram_all_models_{regions[x]}.png"
+    if density:
+        outfile = outfile[:-4] + "_density.png"
+    plt.savefig(outfile, bbox_inches="tight")
+    plt.show()
+
+
 def plot_duration_histogram_downsampled(event, n_resamples=10000, density=True):
     """Histogram of the number of consecutive years that meet the threshold
 
@@ -199,10 +288,10 @@ def plot_duration_histogram_downsampled(event, n_resamples=10000, density=True):
         sample sizes between models and observations).
     """
 
-    # Model whisker colors
+    # Model boxplot colors
     colors = mpl.colormaps.get_cmap("plasma")(np.linspace(0, 1, len(models) + 1))
 
-    fig, axes = plt.subplots(2, 1, figsize=(12, 10))
+    fig, axes = plt.subplots(2, 1, figsize=(10, 8))
     for i, ax in enumerate(axes):
         ax.set_title(
             f"{letters[i]}) {regions[i]} region consecutive {event.alt_name} years",
@@ -226,8 +315,8 @@ def plot_duration_histogram_downsampled(event, n_resamples=10000, density=True):
 
         # Downsampled model boxplots (fits all models within each bar)
         for m, model in enumerate(models):
-
             ds = gsr_data_regions(model).isel(x=i)
+
             # Produces n_resamples of obs-sized subsample
             counts, bins, _ = get_event_duration_counts(
                 event,
@@ -240,21 +329,25 @@ def plot_duration_histogram_downsampled(event, n_resamples=10000, density=True):
             )
 
             # Model boxplot
-            ax.boxplot(
+            bp = ax.boxplot(
                 counts,
-                whis=[5, 95],
+                whis=[2.5, 97.5],
                 sym=".",
                 label=model,
                 positions=(bins[:-1] - 0.5) + (m + 1) / 10,
                 tick_labels=bins[:-1],
                 widths=0.05,
-                boxprops=dict(lw=0.7),
+                capwidths=0.06,
+                # notch=True, # Indent median
+                patch_artist=True,  # Fill boxes
                 whiskerprops=dict(color=colors[m]),
-                medianprops=dict(color=colors[m]),
-                flierprops=dict(
-                    ms=4, markerfacecolor=colors[m], markeredgecolor=colors[m]
-                ),
+                medianprops=dict(color="lightgrey", lw=1.2),
+                boxprops=dict(facecolor=colors[m], edgecolor="k", lw=0.2),
+                flierprops=dict(ms=4, markerfacecolor=colors[m], markeredgecolor=colors[m]),
             )
+            # Only keep max & min outliers
+            boxplot_show_only_last_outliers(bp)
+
         ax.set_xticks(bins[:-1])
         ax.set_xlim(bins[0] - 0.5, bins[-1] - 0.5)
         ax.set_xticklabels(bins[:-1])
@@ -266,9 +359,7 @@ def plot_duration_histogram_downsampled(event, n_resamples=10000, density=True):
             ax.set_ylabel("Frequency")
 
         handles, labels = ax.get_legend_handles_labels()
-        order = np.concatenate(
-            ([-1], np.arange(len(models)))
-        )  # AGCD first, then models
+        order = np.concatenate(([-1], np.arange(len(models))))  # AGCD first, then models
         lgd = ax.legend(
             [handles[i] for i in order],
             [labels[i] for i in order],
@@ -301,7 +392,6 @@ def plot_duration_heatmap(event):
             f"{letters[i]}) {regions[i]} region consecutive {event.alt_name} years",
             loc="left",
         )
-        # model boxplots
         counts_list = []
         for m, model in enumerate(dataset_names):
             ds = gsr_data_regions(model).isel(x=i)
@@ -313,17 +403,16 @@ def plot_duration_heatmap(event):
                 downsample=False,
             )
             counts_list.append(counts)
-        # combine model counts into (duration, model) xr.dataarray
+
+        # Combine model counts into (duration, model)
         counts = xr.DataArray(
-            np.stack(counts_list[::-1]),  # reverse to match dataset_names order
+            np.stack(counts_list[::-1]),  # reverse to match data name order
             dims=["model", "duration"],
             coords={"duration": bins[:-1], "model": dataset_names},
         )
         counts.attrs["units"] = "Probability (%)"
         bounds = np.power(10.0, np.arange(-3, 1))
-        bounds = np.append(
-            bounds, np.arange(2, 16 + 2, 2)
-        )  # add upper bound to include max value
+        bounds = np.append(bounds, np.arange(2, 16 + 2, 2))  # add upper bound to include max value
         ncolors = len(bounds) - 1
         cmap = plt.cm.get_cmap("plasma", ncolors)
         norm = BoundaryNorm(boundaries=bounds, ncolors=ncolors)
@@ -368,9 +457,7 @@ def plot_transition_duration_histogram(da_quantile, model, event, time_dim):
         transition = transition[::-1]
 
     fig, ax = plt.subplots(2, 3, figsize=(12, 9))
-    fig.suptitle(
-        f"{model} years between n {transition[0]} years and a {transition[1]} year"
-    )
+    fig.suptitle(f"{model} years between n {transition[0]} years and a {transition[1]} year")
 
     counter = 0
     for i, region in enumerate(regions):
@@ -467,9 +554,7 @@ def subplot_transition_histogram(ax, k, total, bins, var, alpha=1):
     return ax
 
 
-def plot_transition_histogram(
-    da_quantile, model, event, time_dim="time", quantile_var="tercile"
-):
+def plot_transition_histogram(da_quantile, model, event, time_dim="time", quantile_var="tercile"):
     """Plot histogram of next year GSR quantile (after 1,2,3-year spells).
 
     Parameters
@@ -513,9 +598,7 @@ def plot_transition_histogram(
             ax[i, j].set_title(f"{region} region GSR after {N}yr event")
             dx = ds.isel(x=i, n=j)
 
-            ax[i, j] = subplot_transition_histogram(
-                ax[i, j], dx.k, dx.total, bins, quantile_var
-            )
+            ax[i, j] = subplot_transition_histogram(ax[i, j], dx.k, dx.total, bins, quantile_var)
 
     plt.tight_layout()
     plt.savefig(
@@ -524,9 +607,7 @@ def plot_transition_histogram(
     plt.show()
 
 
-def plot_transition_histogram_downsampled(
-    event, n_resamples=10000, quantile_var="tercile"
-):
+def plot_transition_histogram_downsampled(event, n_resamples=10000, quantile_var="tercile"):
     """Plot next year GSR tercile histograms (AGCD with downsampled model box & whiskers).
 
     Parameters
@@ -576,16 +657,22 @@ def plot_transition_histogram_downsampled(
 
             # Model boxplot
             for m in range(len(models)):
-                ax[i, j].boxplot(
+                bp = ax[i, j].boxplot(
                     (dx.k.isel(model=m).T / dx.isel(model=m).total) * 100,
-                    whis=[5, 95],
+                    whis=[2.5, 97.5],
                     positions=x + (m + 1) / 10,
                     widths=0.03,
+                    capwidths=0.03,
                     sym=".",
-                    boxprops=dict(lw=0.4),
+                    patch_artist=True,  # Fill boxes
+                    boxprops=dict(facecolor=colors[m], edgecolor="k", lw=0.2),
+                    medianprops=dict(color="lightgrey", lw=1.2),
                     whiskerprops=dict(color=colors[m]),
                     flierprops=dict(ms=2, markeredgecolor=colors[m]),
                 )
+                # Only keep max & min outliers
+                boxplot_show_only_last_outliers(bp)
+
             ax[i, j].set_xticks(x + 0.5)
             if j != 0:
                 ax[i, j].set_ylabel(None)  # only left column
@@ -593,9 +680,7 @@ def plot_transition_histogram_downsampled(
             ax[i, j].set_xlim(0, 3)
             ax[i, j].set_ylim(0, 105)
             counter += 1
-    lines = [
-        mpl.lines.Line2D([0], [0], label=m, color=c) for m, c in zip(models, colors)
-    ]
+    lines = [mpl.lines.Line2D([0], [0], label=m, color=c) for m, c in zip(models, colors)]
     lgd = fig.legend(
         handles=lines,
         loc="upper center",
@@ -613,9 +698,7 @@ def plot_transition_histogram_downsampled(
     plt.show()
 
 
-def plot_transition_pie_chart(
-    da_quantile, model, event, time_dim="time", quantile_var="tercile"
-):
+def plot_transition_pie_chart(da_quantile, model, event, time_dim="time", quantile_var="tercile"):
     """Plot pie chart of next year GSR quantile after n years.
 
     Rows are regions, columns are n-year events.
@@ -650,9 +733,7 @@ def plot_transition_pie_chart(
     ds = ds.sum(dims)
 
     fig, ax = plt.subplots(2, 3, figsize=(12, 7))
-    plt.suptitle(
-        f"{model} transition probability after {event.name} {quantile_var} GSR events"
-    )
+    plt.suptitle(f"{model} transition probability after {event.name} {quantile_var} GSR events")
     for i, region in enumerate(regions):
         for j, N in enumerate([1, 2, 3]):
             ax[i, j].set_title(f"{region} region after {N}yr event")
@@ -730,9 +811,7 @@ def subplot_transition_probability_matrix(
 def plot_transition_probability_matrix(da_quantile, model, event, time_dim):
     """Plot the transition matrix for the next year GSR quantile."""
 
-    fig, axes = plt.subplots(
-        1, 2, figsize=(10, 5), constrained_layout=True, sharey=True
-    )
+    fig, axes = plt.subplots(1, 2, figsize=(10, 5), constrained_layout=True, sharey=True)
     for i, region in enumerate(regions):
         ax = axes[i]
         ax.set_title(f"{model} {region} region transitions")
@@ -752,9 +831,7 @@ def plot_transition_probability_matrix(da_quantile, model, event, time_dim):
         drawedges=False,
         ticks=cbar_ticks,
     )
-    cbar.set_ticks(
-        cbar_ticks[2::2], labels=[f"{tick:.1f}" for tick in cbar_ticks[2::2]]
-    )
+    cbar.set_ticks(cbar_ticks[2::2], labels=[f"{tick:.1f}" for tick in cbar_ticks[2::2]])
     cbar.ax.tick_params(size=0, length=0)
     # plt.tight_layout()
     plt.savefig(
@@ -825,9 +902,7 @@ def plot_transition_probability_matrix_mmm(event):
             drawedges=False,
             ticks=cbar_ticks,
         )
-        cbar.set_ticks(
-            cbar_ticks[2::2], labels=[f"{tick:.1f}" for tick in cbar_ticks[2::2]]
-        )
+        cbar.set_ticks(cbar_ticks[2::2], labels=[f"{tick:.1f}" for tick in cbar_ticks[2::2]])
         cbar.ax.tick_params(size=0, length=0)
     # plt.tight_layout()
     plt.savefig(
@@ -911,13 +986,9 @@ def plot_transition_probability_matrix_combined(event):
             # Center tercile labels on x-axis
             ax[x, i].set_xticks(np.arange(ds.q.size) + 0.5, ["Dry", "Average", "Wet"])
             # Center model names between grids on y-axis
-            ax[x, i].set_yticks(
-                np.arange(ds.model.size) + 0.5, [m for m in ds.model.values]
-            )
-            title = f"{letters[counter]}) {region}: Transition after {n} {event.alt_name} years"
-            if n == 1:
-                title = title[:-1]  # fix plural ('years' => 'year')
-            ax[x, i].set_title(title, loc="left")
+            ax[x, i].set_yticks(np.arange(ds.model.size) + 0.5, [m for m in ds.model.values])
+            title = f"{letters[counter]}) {region}: Transition after {n}-yr {event.alt_name} spell"
+            ax[x, i].set_title(title, loc="left", x=-0.025)
             counter += 1
 
     # add horizontal colourbar below subplots
@@ -932,9 +1003,7 @@ def plot_transition_probability_matrix_combined(event):
         pad=0.05,
         aspect=30,
     )
-    cbar.set_ticks(
-        cbar_ticks[2::2], labels=[f"{tick:.1f}" for tick in cbar_ticks[2::2]]
-    )
+    cbar.set_ticks(cbar_ticks[2::2], labels=[f"{tick:.1f}" for tick in cbar_ticks[2::2]])
 
     cbar.ax.tick_params(size=0, length=0)
     plt.savefig(
@@ -980,9 +1049,7 @@ def plot_transition_probability_matrix_all_models(event, quantile_var="tercile")
             pad=0.0,
             aspect=20,
         )
-        cbar.set_ticks(
-            cbar_ticks[2::2], labels=[f"{tick:.1f}" for tick in cbar_ticks[2::2]]
-        )
+        cbar.set_ticks(cbar_ticks[2::2], labels=[f"{tick:.1f}" for tick in cbar_ticks[2::2]])
         cbar.ax.tick_params(size=0, length=0)
         plt.savefig(
             f"{fig_dir}/{event.type}/{event.type}_transition_matrix_all_models.png",
@@ -1038,18 +1105,14 @@ def plot_transition_probability_matrix_downsampled(
                 ax.set_xlabel("Next year Apr-Oct rainfall", fontsize=11)
             if s % nc == 0:
                 # At label at the start of each row
-                ax.set_ylabel(
-                    f"Consecutive {event.name} {quantile_var} years", fontsize=11
-                )
+                ax.set_ylabel(f"Consecutive {event.name} {quantile_var} years", fontsize=11)
             cbar = plt.colorbar(
                 cm,
                 ax=ax,
                 shrink=0.95,
                 format="%3.1f",
             )
-            cbar.set_ticks(
-                cbar_ticks[2::2], labels=[f"{tick:.1f}" for tick in cbar_ticks[2::2]]
-            )
+            cbar.set_ticks(cbar_ticks[2::2], labels=[f"{tick:.1f}" for tick in cbar_ticks[2::2]])
             cbar.ax.tick_params(labelsize=8, size=0, length=0)
 
         plt.tight_layout()
@@ -1117,35 +1180,33 @@ def plot_transition_sample_size(
             #  Iterate over N year events (rows)
             for ni, n in enumerate(event_durations):
                 counter = xi + (len(regions) * ni)  # subplot counter for titles
-                title = f"{letters[counter]}) {x} region: transition after {n} {event.alt_name} years"
-                if n == 1:
-                    title = title[:-1]  # remove 's' for 1 year
+                title = f"{letters[counter]}) {x} region: transition after {n}-year {event.alt_name} spell"
                 ax[ni, xi].set_title(title, loc="left")
 
                 # Plot line at expected probability (33.3%)
                 ax[ni, xi].axhline(100 / 3, c="k", ls=(0, (5, 10)), lw=0.7)
                 bp = ax[ni, xi].boxplot(
                     ds.p.isel(x=xi, n=ni).T,
-                    whis=[5, 95],
+                    whis=[2.5, 97.5],
                     positions=k + np.array([0.75, 1, 1.25]),
                     widths=0.2,
                     sym=".",
                     flierprops=dict(ms=2),
                     patch_artist=True,
                 )
+                # Only keep max & min outliers
+                boxplot_show_only_last_outliers(bp)
 
                 # Fill boxes with colors
                 for patch, color in zip(bp["boxes"], colors):
                     patch.set_facecolor(color)
 
-                ax[ni, xi].margins(x=0.1)
+                ax[ni, xi].margins(x=0.5)
                 ax[ni, xi].set_xticks(np.arange(len(targets)) + 1)
                 ax[ni, xi].set_xticklabels(xticklabels)
                 ax[ni, xi].set_xlabel("Total number of spells")
                 ax[ni, 0].set_ylabel("Probability (%)")  # Only left column
-                ax[ni, xi].legend(
-                    bp["boxes"], ["Dry", "Average", "Wet"], loc="upper right"
-                )
+                ax[ni, xi].legend(bp["boxes"], ["Dry", "Average", "Wet"], loc="upper right")
     plt.tight_layout()
     plt.savefig(
         f"{fig_dir}/{event.type}/{event.type}_transition_sample_size_{model}.png",
@@ -1182,9 +1243,7 @@ def plot_timeseries_AGCD(dv, var="pr", anom=False, trend=False):
 
     # Iterate for each region
     for i, state in enumerate(["WA", "SA"]):
-        axes[i].set_title(
-            f"{letters[i]}) Observed GSR anomalies in the {state} region", loc="left"
-        )
+        axes[i].set_title(f"{letters[i]}) Observed GSR anomalies in the {state} region", loc="left")
 
     # Iterate for each region
     for i, ax in enumerate(axes):
@@ -1289,7 +1348,7 @@ def plot_timeseries_AGCD_events(dv, event, quantile_var="tercile"):
         plt.show()
 
 
-def plot_timeseries_DCPP(dv, event, model):
+def plot_timeseries_DCPP(dv, event, model, show_events=True):
     """Plot the DCPP tercile timeseries with GSR events shaded."""
 
     # Get the GSR events
@@ -1311,9 +1370,7 @@ def plot_timeseries_DCPP(dv, event, model):
 
     # Create a plot for each region
     for x, region in enumerate(regions):  # WA or SA region
-        fig, ax = plt.subplots(
-            nr, nc, figsize=(1.8 * nc, 1.2 * nr), sharey=True, sharex="col"
-        )
+        fig, ax = plt.subplots(nr, nc, figsize=(1.8 * nc, 1.2 * nr), sharey=True, sharex="col")
         fig.suptitle(
             f"{model} {region} region {event.n}yr events of GSR {event.tercile}",
         )
@@ -1324,18 +1381,20 @@ def plot_timeseries_DCPP(dv, event, model):
             for i, init_date in enumerate(init_dates[:nc]):
                 loc = {"ensemble": j, "init_date": init_date, "x": x}
                 da = dv.tercile.isel(loc)
-                da = da.where(~np.isnan(da), drop=True)
+                da = da.dropna("lead_time")
                 years = da.time.dt.year.astype(dtype=int)
 
                 # Plot bars
                 ax[j, i].bar(years, da, color="b", label=j + 1)
-                ax[j, i].axhline(event.threshold, c="k", lw=0.5)
 
-                # Highlight event periods
-                for k in sorted(np.unique(events.isel(loc)))[1:]:
-                    inds = np.nonzero(events.isel(loc).values == k)[0]
-                    t = years.isel(lead_time=inds)
-                    ax[j, i].axvspan(t[0] - 0.4, t[-1] + 0.4, color="red", alpha=0.3)
+                if show_events:
+                    ax[j, i].axhline(event.threshold, c="k", lw=0.5)
+
+                    # Highlight event periods
+                    for k in sorted(np.unique(events.isel(loc)))[1:]:
+                        inds = np.nonzero(events.isel(loc).values == k)[0]
+                        t = years.isel(lead_time=inds)
+                        ax[j, i].axvspan(t[0] - 0.4, t[-1] + 0.4, color="red", alpha=0.3)
 
                 ax[j, i].set_xmargin(0)
                 ax[j, i].set_xticks([years[k] for k in [0, 5 if len(years) > 5 else 3]])
@@ -1357,9 +1416,11 @@ def plot_timeseries_DCPP(dv, event, model):
 
         plt.tight_layout()
         fig.subplots_adjust(hspace=0.2, wspace=0.17)
-        plt.savefig(
-            f"{fig_dir}/timeseries_{event.type}{event.type[4:]}_{region}_{event.n}yr_{model}.png",
-        )
+        if show_events:
+            outfile = f"{fig_dir}/timeseries_{event.type}{event.type[4:]}_{region}_{event.n}yr_{model}.png"
+        else:
+            outfile = f"{fig_dir}/timeseries_{region}_{model}.png"
+        plt.savefig(outfile)
         plt.show()
 
 
@@ -1368,18 +1429,14 @@ def plot_timeseries_heatmap(da):
 
     # ALt timeseries plot for larger ensembles (terciles as heatmap)
     cmap, norm = quantile_cmap(return_colors=False)
-    da.isel(ensemble=slice(3)).plot(
-        col="ensemble", cmap=cmap, norm=norm, figsize=(12, 10)
-    )
+    da.isel(ensemble=slice(3)).plot(col="ensemble", cmap=cmap, norm=norm, figsize=(12, 10))
     da.isel(x=0).plot(
         col="ensemble",
         cmap=cmap,
         norm=norm,
         figsize=(30, 20),
         col_wrap=12,
-        cbar_kwargs=dict(
-            orientation="horizontal", fraction=0.01, pad=0.05, ticks=[1, 2, 3]
-        ),
+        cbar_kwargs=dict(orientation="horizontal", fraction=0.01, pad=0.05, ticks=[1, 2, 3]),
     )
     plt.savefig(f"{home}/test.png")
 
@@ -1401,11 +1458,10 @@ def plot_stability_pdfs(model, da, start_years=np.arange(1960, 2020, 10)):
     """
 
     metric = "Apr-Oct rainfall"
-    units = "Apr-Oct Rainfall [mm / day]"
+    units = "Apr-Oct Rainfall [mm]"
 
-    lead_dim = "lead_time"
-    dims = ["ensemble", "init_date", lead_dim]
-    da = da.dropna(lead_dim, how="all").stack({"sample": dims})
+    dims = ["ensemble", "init_date", "lead_time"]
+    da = da.dropna("lead_time", how="all").stack({"sample": dims})
 
     if da.time.dtype != "O":
         # Convert time coords to cftime (if not already)
@@ -1416,9 +1472,7 @@ def plot_stability_pdfs(model, da, start_years=np.arange(1960, 2020, 10)):
 
     fig, ax = plt.subplots(2, 2, figsize=[20, 17])
     for i, r in enumerate(regions):
-        plot_dist_by_lead(
-            ax[0, i], da.isel(x=i), metric, units=units, lead_dim=lead_dim
-        )
+        plot_dist_by_lead(ax[0, i], da.isel(x=i), metric, units=units, lead_dim="lead_time")
         ax[0, i].set_title(
             f"({letters[i]}) {model} distribution by lead ({r} region)",
         )
@@ -1431,9 +1485,7 @@ def plot_stability_pdfs(model, da, start_years=np.arange(1960, 2020, 10)):
     plt.savefig(outfile, bbox_inches="tight", facecolor="white")
 
 
-def plot_stability_multimodel(
-    stability_dim="time", start_years=np.arange(1960, 2020, 10)
-):
+def plot_stability_multimodel(stability_dim="time", start_years=np.arange(1960, 2020, 10)):
     """Plot each models stability assessment plot in each region.
 
     Parameters
@@ -1453,16 +1505,14 @@ def plot_stability_multimodel(
 
     metric = "Apr-Oct rainfall"
     units = "Growing season rainfall [mm / day]"
-
-    lead_dim = "lead_time"
-    dims = ["ensemble", "init_date", lead_dim]
+    dims = ["ensemble", "init_date", "lead_time"]
 
     for i, r in enumerate(regions):
         fig, ax = plt.subplots(3, 3, figsize=[25, 17])
         ax = ax.flatten()
         for m, model in enumerate(models):
             dv = gsr_data_regions(model).isel(x=i).pr
-            da = dv.dropna(lead_dim, how="all").stack({"sample": dims})
+            da = dv.dropna("lead_time", how="all").stack({"sample": dims})
             if da.time.dtype != "O":
                 # Convert time coords to cftime (if not already)
                 times_new = da["time"].dt.strftime(f"%Y-%m-%d")
@@ -1471,17 +1521,14 @@ def plot_stability_multimodel(
                 da["time"].attrs = da.time.attrs
 
             if stability_dim == "lead":
-                plot_dist_by_lead(ax[m], da, metric, units=units, lead_dim=lead_dim)
-                ax[m].set_title(
-                    f"{letters[m]}) {model} distribution by lead ({r} region)"
-                )
+                plot_dist_by_lead(ax[m], da, metric, units=units, lead_dim="lead_time")
+                ax[m].set_title(f"{letters[m]}) {model} distribution by lead ({r} region)")
             elif stability_dim == "time":
                 plot_dist_by_time(ax[m], da, metric, start_years, units=units)
-                ax[m].set_title(
-                    f"{letters[m]}) {model} distribution by year ({r} region)"
-                )
+                ax[m].set_title(f"{letters[m]}) {model} distribution by year ({r} region)")
 
-            # Reduce upper x-axis limit and avoid negative lower limit (for better visibility of distributions)
+            # Reduce upper x-axis limit and avoid negative lower limit
+            # for better visibility of distributions
             xlim, ticks = ax[m].get_xlim(), ax[m].get_xticks()
             ax[m].set_xlim(max(ticks[0], xlim[0]), min(ticks[-2], xlim[1]))
 
@@ -1491,55 +1538,280 @@ def plot_stability_multimodel(
         plt.show()
 
 
-if __name__ == "__main__":
+def plot_independence(confidence_interval=0.99, show_ci=False):
+    """Plot model independence for each model and region.
 
-    n_resamples = 10000
-    quantile_var = "tercile"
+    Plots 3x3 grid where each subplot shows the ensemble mean
+    correlation coefficent as a function of lead.
+    Markers are circles for WA and crosses for SA.
+    """
 
-    # Multi-model plots
-    plot_stability_multimodel(stability_dim="time")
-    plot_stability_multimodel(stability_dim="lead")
+    n_resamples = 1000 if show_ci else 10  # quicker if not needed
 
-    for event in [Events(operator="less"), Events(operator="greater")]:
-        plot_transition_probability_matrix_all_models(event)
-        plot_transition_probability_matrix_mmm(event)
-        plot_transition_probability_matrix_combined(event)
-        plot_transition_histogram_downsampled(event, n_resamples)
-        plot_duration_histogram_downsampled(event, n_resamples, density=True)
-        plot_duration_histogram_downsampled(event, n_resamples, density=False)
+    fig, ax = plt.subplots(3, 3, figsize=[14, 10], sharey=True, sharex=True)
+    ax = ax.flatten()
 
-    # Dataset-specific plots
-    for model in dataset_names:
-        for operator in ["less", "greater"]:
-            time_dim = "time" if model == "AGCD" else "lead_time"
+    for i, model in enumerate(models):
+        ds_pr = gsr_data_regions(model)
+        # Restart colour cycling for each model (all markers different colours)
+        colors = iter(plt.cm.Set1(np.linspace(0, 1, 9)))
 
-            # Properties of events with different upper limits
-            event = Events(n=3, operator=operator)
-            event_max = Events(2, operator, fixed_duration=False)
-            events = [Events(i, operator) for i in [2, 3]]
-            dv = gsr_data_regions(model)
+        # Plot regions with different symbols
+        for j, r in enumerate(regions):
 
-            # Region specific plots
-            if model in models:
-                plot_stability_pdfs(model, dv.pr)
-                # plot_timeseries_DCPP(dv, event, model)
-                plot_transition_probability_matrix_downsampled(dv.tercile, model, event)
-                plot_transition_sample_size(dv.tercile, model, event, n_resamples)
-            else:
-                plot_timeseries_AGCD(dv, var="pr", anom=True, trend=True)
-                plot_timeseries_AGCD(dv, var="pr", anom=False, trend=False)
-                for ev in [event_max, *events]:
-                    plot_timeseries_AGCD_events(dv, ev)
-
-            plot_duration_histogram(
-                dv, event_max, model, time_dim=time_dim, quantile_var="tercile"
+            # Get metric dataset
+            data = ds_pr.pr.isel(x=j).dropna("lead_time", how="all")
+            ds = run_tests(
+                data,
+                comparison_fcst=None,
+                init_dim="init_date",
+                lead_dim="lead_time",
+                ensemble_dim="ensemble",
+                confidence_interval=confidence_interval,
+                n_resamples=n_resamples,
             )
-            plot_transition_probability_matrix(dv.tercile, model, event, time_dim)
-            plot_transition_histogram(dv.tercile, model, event, time_dim)
-            plot_transition_pie_chart(dv.tercile, model, event, time_dim)
-            plot_transition_duration_histogram(dv.tercile, model, event, time_dim)
 
-    # Print longest event durations for each model
+            # Seperate init months (only needed for CAFE)
+            months = sorted(list(ds["r"].month.values))
+            for k, month in enumerate(months):
+                color = next(colors)
+                label = f"{r}"
+                if len(months) > 1:
+                    label += f" ({calendar.month_abbr[month]} starts)"
+
+                # Plot the ensemble mean correlation
+                mean_corr = ds["r"].isel(month=k).dropna("lead_time")
+                lead = np.arange(mean_corr.lead_time.size)
+                ax[i].scatter(
+                    lead + (k * 0.1),  # shift next marker over a bit
+                    mean_corr,
+                    color=color,
+                    marker=["o", "x"][j],
+                    linestyle="None",
+                    s=45,
+                    label=label,
+                    alpha=0.5 + k * 0.5,
+                )
+                if show_ci:
+                    # Plot the null correlation bounds as dashed lines
+                    bounds = ds["ci"].isel(month=k).values
+                    for k in range(2):
+                        ax[i].axhline(bounds[k], c=color, ls="--")
+
+        if not show_ci:
+            ax[i].axhline(0.25, c="grey", ls="--")
+        ax[i].axhline(0, c="k", lw=0.5)
+        # Ticks
+        ax[i].set_xticks(np.arange(0, 10))
+        ax[i].set_yticks(np.arange(-0.05, 0.35, 0.05))
+        ax[i].margins(0.1)
+        ax[i].set_xlim(-0.5, 9.5)
+        # Labels
+        ax[i].set_title(f"{letters[i]}) {model}", loc="left")
+        ax[i].legend(loc="upper right")
+        if i in [0, 3, 6]:
+            ax[i].set_ylabel(ds["r"].attrs["long_name"])
+        if i in [6, 7, 8]:
+            ax[i].set_xlabel("Lead time")
+
+    outfile = f"{fig_dir}/independence-test_growing-season-pr-multimodel.png"
+    if show_ci:
+        outfile = outfile[:-4] + "_ci.png"
+    plt.tight_layout()
+    plt.savefig(outfile, bbox_inches="tight", facecolor="white")
+    plt.show()
+
+
+def get_moments(da, da_obs, moments, n_resamples=10000):
+    """Stolen from unseen.moments"""
+
+    da_stacked = (
+        da.dropna("lead_time")
+        .stack({"sample": ["ensemble", "init_date", "lead_time"]})
+        .dropna("sample")
+    )
+    moments_model = calc_moments(da_stacked, core_dim="sample")
+    sample_size = len(da_obs)
+    logging.info(f"sample size: obs={sample_size}, model={len(da_stacked.sample)}")
+
+    moments_obs = calc_moments(da_obs)
+    bootstrap_values = {}
+    lower_ci, upper_ci = {}, {}
+
+    for moment in moments:
+        bootstrap_values[moment] = []
+        lower_ci[moment], upper_ci[moment] = [], []
+
+    rng = np.random.default_rng(seed=0)
+    for i in range(n_resamples):
+        random_sample = rng.choice(da_stacked, sample_size)
+        sample_moments = calc_moments(random_sample)
+        for moment in moments:
+            bootstrap_values[moment].append(sample_moments[moment])
+
+    for moment in moments:
+        _lower_ci, _upper_ci = calc_ci(bootstrap_values[moment])
+        lower_ci[moment] = _lower_ci
+        upper_ci[moment] = _upper_ci
+    return moments_obs, moments_model, bootstrap_values, lower_ci, upper_ci
+
+
+def plot_moments(x=0, n_resamples=10000, verbose=True):
+    """Create a moments assessment plot."""
+
+    def get_cftime_year(da):
+        """Get year from cftime (handles NaNs)."""
+
+        def is_time_na(time):
+            """Check if time is None or NaN."""
+            return (time == None) | (time != time)
+
+        def _get_cftime_year(times):
+            """Get year from cftime (1D)."""
+            # Check if array, scalar or na
+            if isinstance(times, np.ndarray):
+                y = [t.year if is_time_na(t) else 9999 for t in times.flat]
+                y = np.array(y).reshape(times.shape)
+            elif not is_time_na(times):
+                y = times.year
+            else:
+                y = 9999
+            return y
+
+        years = xr.apply_ufunc(
+            _get_cftime_year,
+            da["time"],
+            vectorize=True,
+            dask="parallelized",
+            # output_dtypes=[int]
+        )
+        return years
+
+    moments = [
+        "mean",
+        "standard deviation",
+        "skew",
+        "kurtosis",
+        "GEV shape",
+        "GEV location",
+        "GEV scale",
+    ]
+
+    ds_obs = gsr_data_regions("AGCD", quantile_var="tercile", detrend=0)
+    ds_obs = ds_obs.pr.isel(x=x)
+
+    fig, ax = plt.subplots(len(models), 4, figsize=[15, 24], sharex="col")
+
+    for i, model in enumerate(models):
+
+        da = gsr_data_regions(model, quantile_var="tercile").pr.isel(x=x)
+        # Subset model to obs end year (assumes obs ends before models)
+        end_year = ds_obs.time.dt.year.max().item()
+        if model == "CAFE":
+            # Handles NaNs due to lead diffs, but struggles with some dtypes
+            da = da.where(get_cftime_year(da) <= end_year, drop=True)
+        else:
+            da = da.where(da.time.dt.year <= end_year, drop=True)
+
+        # Subset obs to model start year (assumes obs starts before models)
+        years_model = (
+            da.stack({"sample": ["init_date", "lead_time"]}).dropna("sample").time.dt.year.values
+        )
+        start_year = years_model.min()
+        da_obs = ds_obs.where(ds_obs.time.dt.year >= start_year, drop=True)
+        years_obs = da_obs.time.dt.year.values
+        years_obs_full = ds_obs.time.dt.year.values
+
+        # Get moments test results
+        moments_obs_full = calc_moments(ds_obs)
+        moments_obs, moments_model, bootstrap_values, lower_ci, upper_ci = get_moments(
+            da, da_obs, moments, n_resamples
+        )
+
+        # Log results
+        if verbose:
+            logging.info(f"{model} ({regions[x]})")
+            _ = log_results(moments_obs, lower_ci, upper_ci)
+
+        # Different colour for each column/moment
+        colors = iter(plt.cm.Set1(np.linspace(0, 1, 9)))
+
+        # Plot moment in each column (excluding GEV moments)
+        for j, moment in enumerate(moments[:4]):
+            c = next(colors)
+            # Add moment title at top of each column (above model)
+            ax[0, j].set_title(f"{moment.capitalize()}\n")
+            # Add model name in first col of each row
+            ax[i, 0].set_title(f"({letters[i]}) {model}", loc="left")
+
+            # Model mean (coloured solid line)
+            label = f"Model ({years_model.min()}-{years_model.max()})"
+            ax[i, j].axvline(moments_model[moment], color=c, lw=4, label=label)
+
+            # Model 95% CI (coloured dashed lines)
+            ax[i, j].axvline(lower_ci[moment], color=c, lw=3, ls="--")
+            ax[i, j].axvline(upper_ci[moment], c=c, lw=3, ls="--", label="95% CI")
+
+            # Obs mean (black solid line)
+            label = f"Obs ({years_obs.min()}-{years_obs.max()})"
+            ax[i, j].axvline(moments_obs[moment], c="k", lw=3, label=label)
+
+            # Full obs mean (dotted grey line)
+            label = f"Obs ({years_obs_full.min()}-{years_obs_full.max()})"
+            ax[i, j].axvline(moments_obs_full[moment], c="grey", lw=3, ls=":", label=label)
+
+            # Model histogram
+            ax[i, j].hist(bootstrap_values[moment], rwidth=0.8, color=c, alpha=0.5)
+
+            ax[i, j].xaxis.set_minor_locator(mpl.ticker.AutoMinorLocator())
+            ax[i, j].yaxis.set_minor_locator(mpl.ticker.AutoMinorLocator())
+            if i == len(models) - 1:
+                ax[-1, j].set_xlabel(f"{moment.capitalize()}")  # Last row x-axis label
+        # First column: y-axis label
+        ax[i, 0].set_ylabel("Count")
+        # Last column: legend for obs lines
+        ax[i, -1].legend(loc="upper right", fontsize="small")
+
+        if verbose:
+            # !!! print kurtoisis range
+            logging.info(
+                f"{moment}: {min(bootstrap_values[moment])}, {max(bootstrap_values[moment])}"
+            )
+
+    ax[0, 0].set_title(f"{regions[x]} region: Mean\n")
+    plt.tight_layout()
+    outfile = f"{fig_dir}/moments-test_growing-season-pr-multimodel-{regions[x]}.png"
+    plt.savefig(outfile, bbox_inches="tight", facecolor="white")
+    plt.show()
+
+
+def plot_obs_datasets_compare():
+
+    fig, ax = plt.subplots(2, 2, figsize=(14, 8))
+    for i, r in enumerate(regions):
+        file_1 = f"{data_dir}/growing-season-pr_AGCD-CSIRO_1901-2024_AMJJASO_crops-{r}.nc"
+        file_2 = f"{data_dir}/growing-season-pr_AGCD-monthly_1900-2022_AMJJASO_crops-{r}.nc"
+        file_3 = f"{data_dir}/growing-season-pr_AGCD_1901-2025_AMJJASO_crops-{r}.nc"
+
+        ds1 = xr.open_dataset(file_1)
+        ds2 = xr.open_dataset(file_2)
+        ds3 = xr.open_dataset(file_3)
+        labels = ["daily 1900-2023 (moments)", "monthly 1900-2022 (2xAug)", "monthly 1900-2025"]
+        ax[i, 0].set_title(r)
+        ax[i, 1].set_title("Histogram")
+        for j, ds, label, c in zip(range(3), [ds1, ds2, ds3], labels, ["r", "g", "b"]):
+            ds.pr.plot(ax=ax[i, 0], c=c, alpha=0.4, label=label)
+            # ax[i, 0].bar(ds.time.dt.year, ds.pr, fc=c, alpha=0.4, label=label)
+            bins = None  # np.arange(125, 500, 50)
+            ds.pr.plot.hist(ax=ax[i, 1], fc=c, alpha=0.4, bins=bins, label=label)
+
+    ax[0, 0].legend(fontsize="small")
+
+    return
+
+
+def log_model_event_durations():
+    # Log longest event durations for each model
     for model in models:
         time_dim = "time" if model == "AGCD" else "lead_time"
         dv = gsr_data_regions(model)
@@ -1557,6 +1829,79 @@ if __name__ == "__main__":
             )
             ds = ds_events.stack({"sample": ["init_date", "ensemble", "event"]})
             duration.append(ds.duration.max("sample").astype(dtype=int).values)
-        print(
+        logging.info(
             f"{model:<14s} (WA, SA): dry={duration[0][0]},{duration[0][1]} wet={duration[1][0]},{duration[1][1]}"
         )
+
+
+if __name__ == "__main__":
+
+    n_resamples = 10000
+    quantile_var = "tercile"
+
+    # Multi-model evaluation plots
+    plot_independence()
+    plot_independence(confidence_interval=0.99, show_ci=True)
+    plot_moments(x=0, n_resamples=n_resamples)
+    plot_moments(x=1, n_resamples=n_resamples)
+    plot_stability_multimodel(stability_dim="time")
+    plot_duration_histogram_all_models(
+        0, Events(operator="greater"), quantile_var="tercile", density=True
+    )
+    plot_duration_histogram_all_models(
+        1, Events(operator="greater"), quantile_var="tercile", density=True
+    )
+    plot_duration_histogram_all_models(
+        0, Events(operator="less"), quantile_var="tercile", density=True
+    )
+    plot_duration_histogram_all_models(
+        1, Events(operator="less"), quantile_var="tercile", density=True
+    )
+    plot_stability_multimodel(stability_dim="lead")
+    for model in models:
+        dv = gsr_data_regions(model)
+        plot_stability_pdfs(model, dv.pr)
+        dv.close()
+
+# # Multi-model plots
+for event in [Events(operator="less"), Events(operator="greater")]:
+    plot_transition_probability_matrix_combined(event)
+    plot_transition_probability_matrix_all_models(event)
+    plot_transition_probability_matrix_mmm(event)
+    plot_transition_histogram_downsampled(event, n_resamples)
+    plot_duration_histogram_downsampled(event, n_resamples, density=True)
+    plot_duration_histogram_downsampled(event, n_resamples, density=False)
+
+# Dataset-specific plots
+for model in dataset_names:
+    for operator in ["less", "greater"]:
+        time_dim = "time" if model == "AGCD" else "lead_time"
+
+        # Properties of events with different upper limits
+        event = Events(n=3, operator=operator)
+        event_max = Events(2, operator, fixed_duration=False)
+        events = [Events(i, operator) for i in [2, 3]]
+        dv = gsr_data_regions(model)
+
+    # Region specific plots
+    if model in models:
+        plot_timeseries_DCPP(dv, event, model)
+        plot_transition_probability_matrix_downsampled(dv.tercile, model, event)
+        # @todo rerun
+        plot_transition_sample_size(dv.tercile, model, event, n_resamples)
+    else:
+        plot_timeseries_AGCD(dv, var="pr", anom=True, trend=True)
+        plot_timeseries_AGCD(dv, var="pr", anom=False, trend=False)
+        for ev in [*events, event_max]:
+            # NB max length overwrites file name for 2yr events
+            plot_timeseries_AGCD_events(dv, ev)
+
+    plot_duration_histogram(dv, event_max, model, time_dim=time_dim, quantile_var="tercile")
+    plot_transition_probability_matrix(dv.tercile, model, event, time_dim)
+    plot_transition_histogram(dv.tercile, model, event, time_dim)
+    plot_transition_pie_chart(dv.tercile, model, event, time_dim)
+    plot_transition_duration_histogram(dv.tercile, model, event, time_dim)
+
+    log_model_resolutions()
+    log_sample_sizes()
+    log_model_event_durations()  # Fairly slow
