@@ -5,6 +5,7 @@
 """
 
 from dataclasses import dataclass
+import logging
 import numpy as np
 import pandas as pd
 import scipy
@@ -12,6 +13,7 @@ import xarray as xr
 
 from process_gsr_data import gsr_data_regions
 
+logging.basicConfig(level=logging.INFO)
 
 @dataclass
 class Events:
@@ -591,17 +593,19 @@ def downsampled_transition_probability(
 
     assert var == "tercile", "Only tercile variable currently supported"
     rng = np.random.default_rng(seed=0)
+    event_durations = np.arange(1, 4)  # event durations >3 not implemented
     bins = np.arange(1, 5)
-    ds = xr.Dataset(coords={"x": regions, "n": np.arange(1, 4), "q": bins[:-1]})
 
+    ds = xr.Dataset(coords={"x": regions, "n": np.arange(1, 4), "q": bins[:-1]})
+    
     if target == "AGCD":
         # AGCD sample sizes for each region
         dv_agcd = gsr_data_regions("AGCD")
         k_agcd, n_agcd, _ = transition_probability(
-            dv_agcd.tercile,
-            event.threshold,
-            event.operator,
-            np.arange(1, 4),
+            da=dv_agcd.tercile,
+            threshold=event.threshold,
+            operator=event.operator,
+            min_duration=event_durations,
             var=var,
             time_dim="time",
             binned=True,
@@ -624,7 +628,7 @@ def downsampled_transition_probability(
         da,
         event.threshold,
         event.operator,
-        np.arange(1, 4),  # event durations (>3 not implemented)
+        event_durations,  
         var=var,
         time_dim="lead_time",
         binned=False,
@@ -729,6 +733,8 @@ def get_event_duration_counts(
         # Get n_resamples of model subsamples
         # Approximate number of obs samples (nb "events" must calculated over lead_time dim)
         ds_events = ds_events.stack(dict(sample=["ensemble", "init_date"]))
+        ds_events = ds_events.where(~np.isnan(ds_events.total_samples).load(), drop=True)
+
         # Get N samples of subsampled data
         # len(subsample) = n_init_blocks * len(lead_time) (e.g., 12x10-year runs)
         n_lead = ds[time_dim].size
@@ -738,34 +744,46 @@ def get_event_duration_counts(
 
         if m == "CAFE":
             # Half of the CAFE runs have one less lead time
-            _n_lead = (n_lead + (n_lead - 1)) / 2
+            _n_lead = n_lead - 1#(n_lead + (n_lead - 1)) / 2
+            n_init_blocks = N_obs // _n_lead
             N = _n_lead * n_init_blocks
-
+        
         # Select n_resamples of subsamples
         rng = np.random.default_rng(seed=42)
-        ds_events_sampled = rng.choice(
-            ds_events.duration.T,
+        sample_inds = rng.choice(
+            np.arange(ds_events.sample.size, dtype=int), 
             (n_resamples, n_init_blocks),
             replace=True,
             axis=0,
         )
-        ds_events_sampled = xr.DataArray(
-            ds_events_sampled, dims=("sample", "block", "event")
+        sample_inds = xr.DataArray(
+            sample_inds, dims=("sample", "block")
         )
+        ds_events_sampled  = ds_events.isel(sample=sample_inds)
+        # ds_events_sampled = xr.DataArray(
+        #     ds_events_sampled, dims=("sample", "block", "event")
+        # )
+        # Total samples in each block
+        N_block = ds_events_sampled.total_samples.sum('block').load()
 
+        logging.info(f"{m}: n_lead={n_lead}, blocks={n_init_blocks}, N={N}, N_block={N_block.min().item()}-{N_block.max().item()}")
+        N = N_block
         # Stack the events in each subsample (sample, block, event) -> (sample, subsample)
         ds_events_sampled = ds_events_sampled.stack(dict(subsample=["block", "event"]))
+        ds_events_sampled = ds_events_sampled.chunk(subsample=-1)
 
         # Bin the durations in each subsample
         counts, _ = xr.apply_ufunc(
             np.histogram,
-            ds_events_sampled,
+            ds_events_sampled.duration ,
             input_core_dims=[["subsample"]],
             output_core_dims=[["bin"], ["bin_edges"]],
             vectorize=True,
             dask="parallelized",
             kwargs=dict(bins=bins),
-            output_dtypes=["int"] * ((len(bins) * 2) - 1),
+            output_dtypes=("int", 'int'),
+            # output_sizes=
+            dask_gufunc_kwargs=dict(output_sizes=dict(bin=len(bins), bin_edges=len(bins) + 1))
         )
 
     if density:
