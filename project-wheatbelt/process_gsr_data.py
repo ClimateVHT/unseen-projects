@@ -203,7 +203,7 @@ def gsr_data_regions(model, quantile_var="tercile", detrend=0):
     else:
 
         ds_region_list = [
-            xr.open_mfdataset(f[0]).assign_coords(dict(x=n)) for f, n in zip(files, regions)
+            xr.open_mfdataset(f).assign_coords(dict(x=n)) for f, n in zip(files, regions)
         ]
 
     if "AGCD" not in model:
