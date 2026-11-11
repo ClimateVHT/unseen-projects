@@ -1214,7 +1214,7 @@ def plot_transition_sample_size(
     plt.show()
 
 
-def plot_timeseries_AGCD(dv, var="pr", anom=False, trend=False):
+def plot_timeseries_AGCD(dv, var="pr", anom=True, trend=True):
     """Plot timseries of AGCD GSR (rainfall or quantiles) in WA & SA regions.
 
     Parameters
@@ -1243,12 +1243,18 @@ def plot_timeseries_AGCD(dv, var="pr", anom=False, trend=False):
 
     # Iterate for each region
     for i, state in enumerate(["WA", "SA"]):
-        axes[i].set_title(f"{letters[i]}) Observed GSR anomalies in the {state} region", loc="left")
+        axes[i].set_title(
+            f"{letters[i]}) Observed GSR {'anomalies ' if anom else ''}in the {state} region",
+            loc="left",
+        )
 
     # Iterate for each region
     for i, ax in enumerate(axes):
         # Plot da timeseries as bars
-        ax.bar(dv.pr.time.dt.year, da.isel(x=i), color="blue")
+        for j, color in enumerate(quantile_cmap(return_colors=1)):
+            label = f"{['Dry', 'Average', 'Wet'][j]} tercile"
+            dx = da.isel(x=i).where(dv["tercile"].isel(x=i).load() == j + 1, drop=1)
+            ax.bar(dx.time.dt.year, dx, color=color, edgecolor="k", label=label)
 
         # Add linear trend line and print result of significance test
         if trend:
@@ -1270,7 +1276,7 @@ def plot_timeseries_AGCD(dv, var="pr", anom=False, trend=False):
             ls = "solid"
             label = "Trend"
             ax.plot(x, trend_line, color="red", lw=2, ls=ls, label=label)
-            ax.legend()
+        axes[0].legend(ncols=3)
 
         ax.set_ylabel(ylabel)
         ax.set_xmargin(0)
@@ -1511,6 +1517,7 @@ def plot_stability_multimodel(stability_dim="time", start_years=np.arange(1960, 
         fig, ax = plt.subplots(3, 3, figsize=[25, 17])
         ax = ax.flatten()
         for m, model in enumerate(models):
+            print(model)
             dv = gsr_data_regions(model).isel(x=i).pr
             da = dv.dropna("lead_time", how="all").stack({"sample": dims})
             if da.time.dtype != "O":
@@ -1812,7 +1819,7 @@ def plot_obs_datasets_compare():
 
 def log_model_event_durations():
     # Log longest event durations for each model
-    for model in models:
+    for model in dataset_names:
         time_dim = "time" if model == "AGCD" else "lead_time"
         dv = gsr_data_regions(model)
         duration = []
@@ -1827,7 +1834,10 @@ def log_model_event_durations():
                 fixed_duration=False,
                 time_dim=time_dim,
             )
-            ds = ds_events.stack({"sample": ["init_date", "ensemble", "event"]})
+            if model in models:
+                ds = ds_events.stack({"sample": ["init_date", "ensemble", "event"]})
+            else:
+                ds = ds_events.stack({"sample": ["event"]})
             duration.append(ds.duration.max("sample").astype(dtype=int).values)
         logging.info(
             f"{model:<14s} (WA, SA): dry={duration[0][0]},{duration[0][1]} wet={duration[1][0]},{duration[1][1]}"
@@ -1839,68 +1849,57 @@ if __name__ == "__main__":
     n_resamples = 10000
     quantile_var = "tercile"
 
-    # Multi-model evaluation plots
+    # Model evaluation plots
     plot_independence()
     plot_independence(confidence_interval=0.99, show_ci=True)
-    plot_moments(x=0, n_resamples=n_resamples)
-    plot_moments(x=1, n_resamples=n_resamples)
     plot_stability_multimodel(stability_dim="time")
-    plot_duration_histogram_all_models(
-        0, Events(operator="greater"), quantile_var="tercile", density=True
-    )
-    plot_duration_histogram_all_models(
-        1, Events(operator="greater"), quantile_var="tercile", density=True
-    )
-    plot_duration_histogram_all_models(
-        0, Events(operator="less"), quantile_var="tercile", density=True
-    )
-    plot_duration_histogram_all_models(
-        1, Events(operator="less"), quantile_var="tercile", density=True
-    )
     plot_stability_multimodel(stability_dim="lead")
+    for x in [0, 1]:
+        plot_moments(x=1, n_resamples=n_resamples)
+        plot_duration_histogram_all_models(x, Events(operator="greater"), density=True)
+        plot_duration_histogram_all_models(x, Events(operator="less"), density=True)
     for model in models:
         dv = gsr_data_regions(model)
         plot_stability_pdfs(model, dv.pr)
         dv.close()
 
-# # Multi-model plots
-for event in [Events(operator="less"), Events(operator="greater")]:
-    plot_transition_probability_matrix_combined(event)
-    plot_transition_probability_matrix_all_models(event)
-    plot_transition_probability_matrix_mmm(event)
-    plot_transition_histogram_downsampled(event, n_resamples)
-    plot_duration_histogram_downsampled(event, n_resamples, density=True)
-    plot_duration_histogram_downsampled(event, n_resamples, density=False)
+    # Multi-model plots
+    for event in [Events(operator="less"), Events(operator="greater")]:
+        plot_transition_probability_matrix_combined(event)
+        plot_transition_probability_matrix_all_models(event)
+        plot_transition_probability_matrix_mmm(event)
+        plot_transition_histogram_downsampled(event, n_resamples)
+        plot_duration_histogram_downsampled(event, n_resamples, density=True)
+        plot_duration_histogram_downsampled(event, n_resamples, density=False)
 
-# Dataset-specific plots
-for model in dataset_names:
-    for operator in ["less", "greater"]:
-        time_dim = "time" if model == "AGCD" else "lead_time"
+    # Dataset-specific plots
+    for model in dataset_names:
+        for operator in ["less", "greater"]:
+            time_dim = "time" if model == "AGCD" else "lead_time"
 
-        # Properties of events with different upper limits
-        event = Events(n=3, operator=operator)
-        event_max = Events(2, operator, fixed_duration=False)
-        events = [Events(i, operator) for i in [2, 3]]
-        dv = gsr_data_regions(model)
+            # Properties of events with different upper limits
+            event = Events(n=3, operator=operator)
+            event_max = Events(2, operator, fixed_duration=False)
+            events = [Events(i, operator) for i in [2, 3]]
+            dv = gsr_data_regions(model)
 
-    # Region specific plots
-    if model in models:
-        plot_timeseries_DCPP(dv, event, model)
-        plot_transition_probability_matrix_downsampled(dv.tercile, model, event)
-        # @todo rerun
-        plot_transition_sample_size(dv.tercile, model, event, n_resamples)
-    else:
-        plot_timeseries_AGCD(dv, var="pr", anom=True, trend=True)
-        plot_timeseries_AGCD(dv, var="pr", anom=False, trend=False)
-        for ev in [*events, event_max]:
-            # NB max length overwrites file name for 2yr events
-            plot_timeseries_AGCD_events(dv, ev)
+            # Dataset- and region-specific plots
+            if model in models:
+                plot_timeseries_DCPP(dv, event, model)
+                plot_transition_probability_matrix_downsampled(dv.tercile, model, event)
+                plot_transition_sample_size(dv.tercile, model, event, n_resamples)
+            else:
+                plot_timeseries_AGCD(dv, var="pr", anom=True, trend=True)
+                plot_timeseries_AGCD(dv, var="pr", anom=False, trend=False)
+                for ev in [*events, event_max]:
+                    # NB max length overwrites file name for 2yr events
+                    plot_timeseries_AGCD_events(dv, ev)
 
-    plot_duration_histogram(dv, event_max, model, time_dim=time_dim, quantile_var="tercile")
-    plot_transition_probability_matrix(dv.tercile, model, event, time_dim)
-    plot_transition_histogram(dv.tercile, model, event, time_dim)
-    plot_transition_pie_chart(dv.tercile, model, event, time_dim)
-    plot_transition_duration_histogram(dv.tercile, model, event, time_dim)
+            plot_duration_histogram(dv, event_max, model, time_dim=time_dim, quantile_var="tercile")
+            plot_transition_probability_matrix(dv.tercile, model, event, time_dim)
+            plot_transition_histogram(dv.tercile, model, event, time_dim)
+            plot_transition_pie_chart(dv.tercile, model, event, time_dim)
+            plot_transition_duration_histogram(dv.tercile, model, event, time_dim)
 
     log_model_resolutions()
     log_sample_sizes()

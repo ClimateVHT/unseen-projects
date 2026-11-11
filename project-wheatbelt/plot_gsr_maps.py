@@ -117,9 +117,7 @@ def plot_aus_map(
     return ax
 
 
-def plot_shapefile(
-    ax, gdf=None, edgecolor="k", facecolor="none", lw=0.6, ls="-", **kwargs
-):
+def plot_shapefile(ax, gdf=None, edgecolor="k", facecolor="none", lw=0.6, ls="-", **kwargs):
     """Plot shapefile outlines of the South Australia and Western Australia regions.
 
     Parameters
@@ -220,9 +218,7 @@ def plot_frequency(ds, model, event, n_times):
     vlim = [1, 10] if event.n == 2 else [0, 4.5]
     levels = MaxNLocator(nbins=9).tick_values(vlim[0], vlim[1])
 
-    fig, ax = plt.subplots(
-        1, 1, figsize=(10, 4), subplot_kw=dict(projection=ccrs.PlateCarree())
-    )
+    fig, ax = plt.subplots(1, 1, figsize=(10, 4), subplot_kw=dict(projection=ccrs.PlateCarree()))
     ax = plot_shapefile(ax, edgecolor="white")
     # Add the total time count to the bottom left corner
     ax.text(
@@ -240,9 +236,7 @@ def plot_frequency(ds, model, event, n_times):
         ax,
         (ds.id.count("event") * 100) / n_times,
         title=f"{model} frequency of {event.decile} GSR for {event.n} years in a row",
-        cbar_kwargs=dict(
-            fraction=0.04, extend="max", label="Frequency (per 100 years)"
-        ),
+        cbar_kwargs=dict(fraction=0.04, extend="max", label="Frequency (per 100 years)"),
         cmap=cmap,
         norm=BoundaryNorm(levels, ncolors=cmap.N, clip=True),
     )
@@ -318,12 +312,8 @@ def plot_duration(ds, model, event):
 def plot_event_stats(ds, model, event):
     """Plot maps of the min, mean, max Apr-Oct rainfall during events."""
 
-    fig, ax = plt.subplots(
-        1, 3, figsize=(14, 8), subplot_kw=dict(projection=ccrs.PlateCarree())
-    )
-    fig.suptitle(
-        f"{model} {event.n}-year {event.decile} Apr-Oct rainfall events", y=0.42
-    )
+    fig, ax = plt.subplots(1, 3, figsize=(14, 8), subplot_kw=dict(projection=ccrs.PlateCarree()))
+    fig.suptitle(f"{model} {event.n}-year {event.decile} Apr-Oct rainfall events", y=0.42)
     for i, var, vmax in zip(range(3), ["min", "mean", "max"], [1200, 1200, 1600]):
         levels = MaxNLocator(nbins=10).tick_values(0, vmax)
         cmap = cmocean.cm.rain
@@ -362,9 +352,7 @@ def plot_deciles(dv, model, q=10):
 
     bins = dv.pr.quantile(q=np.arange(q + 1) / q, dim=dims)
 
-    fig, ax = plt.subplots(
-        1, 3, figsize=(14, 8), subplot_kw=dict(projection=ccrs.PlateCarree())
-    )
+    fig, ax = plt.subplots(1, 3, figsize=(14, 8), subplot_kw=dict(projection=ccrs.PlateCarree()))
     fig.suptitle(f"{model}", y=0.42)
     for i, decile in enumerate([3, 5, 8]):
 
@@ -422,9 +410,7 @@ def plot_persistance_probability(tercile, event, model, time_dim="time"):
     # Probability: successful transitions / total transitions
     p = k / n
 
-    fig, ax = plt.subplots(
-        1, 1, figsize=(10, 4), subplot_kw=dict(projection=ccrs.PlateCarree())
-    )
+    fig, ax = plt.subplots(1, 1, figsize=(10, 4), subplot_kw=dict(projection=ccrs.PlateCarree()))
     # Plot SA and WA regions
     ax = plot_shapefile(ax, edgecolor="grey")
 
@@ -477,12 +463,8 @@ def plot_transition_probability(tercile, event, model, time_dim="time"):
         n = n.sum(dims)
     p = k / n
 
-    fig, axes = plt.subplots(
-        1, 3, figsize=(14, 10), subplot_kw=dict(projection=ccrs.PlateCarree())
-    )
-    fig.suptitle(
-        f"{model} {event.n}-year {event.name} tercile Apr-Oct rainfall", y=0.36
-    )
+    fig, axes = plt.subplots(1, 3, figsize=(14, 10), subplot_kw=dict(projection=ccrs.PlateCarree()))
+    fig.suptitle(f"{model} {event.n}-year {event.name} tercile Apr-Oct rainfall", y=0.36)
 
     # Plot maps of transition probabilities to a dry, medium, and wet year
     for i, ax in enumerate(axes.flat):
@@ -591,15 +573,13 @@ def plot_study_region_maps():
         ],
         1,
     )
-
-    ds = [gsr_data_aus_DCPP(models[4]), gsr_data_aus_DCPP(models[0])]
+    m_idx_1, m_idx_2 = 4, 1  # HadGEM3 and CanESM5
+    ds = [gsr_data_aus_DCPP(models[m_idx_1]), gsr_data_aus_DCPP(models[m_idx_2])]
 
     fig = plt.figure(figsize=(10, 8))
     ax = [None] * 3
     # Mini Australia map (left, bottom, width, height)
-    ax[0] = fig.add_subplot(
-        2, 1, 1, projection=ccrs.PlateCarree(), position=[0.4, 0.38, 0.2, 0.4]
-    )
+    ax[0] = fig.add_subplot(2, 1, 1, projection=ccrs.PlateCarree(), position=[0.4, 0.38, 0.2, 0.4])
     ax[1] = fig.add_subplot(2, 2, 3, projection=ccrs.PlateCarree())
     ax[2] = fig.add_subplot(2, 2, 4, projection=ccrs.PlateCarree())
 
@@ -613,15 +593,9 @@ def plot_study_region_maps():
     ax[0].add_feature(cfeature.LAND, alpha=0.1)
     ax[0].set_extent(extent, crs=ccrs.PlateCarree())
     ax[0] = plot_shapefile(ax[0], gdf_aus, "k", facecolor="none")  # alpha=0.1, lw=1.5)
-    ax[0] = plot_shapefile(
-        ax[0], gdf_states, "grey", facecolor="none", alpha=0.5, lw=0.5
-    )
-    ax[0] = plot_shapefile(
-        ax[0], gdf_wa, COLOR_WA, facecolor=COLOR_WA, alpha=0.4, lw=1.5
-    )
-    ax[0] = plot_shapefile(
-        ax[0], gdf_sa, COLOR_SA, facecolor=COLOR_SA, alpha=0.4, lw=1.5
-    )
+    ax[0] = plot_shapefile(ax[0], gdf_states, "grey", facecolor="none", alpha=0.5, lw=0.5)
+    ax[0] = plot_shapefile(ax[0], gdf_wa, COLOR_WA, facecolor=COLOR_WA, alpha=0.4, lw=1.5)
+    ax[0] = plot_shapefile(ax[0], gdf_sa, COLOR_SA, facecolor=COLOR_SA, alpha=0.4, lw=1.5)
     rect_wa = mpatches.Rectangle(
         (extent_wa[0], extent_wa[2]),
         extent_wa[1] - extent_wa[0],
@@ -649,9 +623,7 @@ def plot_study_region_maps():
 
     # (a) WA region with HadGEM3 gridlines
     ax[1] = plot_aus_map(fig, ax[1], None)
-    ax[1] = plot_shapefile(
-        ax[1], gdf_wa, COLOR_WA, facecolor=COLOR_WA, alpha=0.4, lw=1.5
-    )
+    ax[1] = plot_shapefile(ax[1], gdf_wa, COLOR_WA, facecolor=COLOR_WA, alpha=0.4, lw=1.5)
     for spine in ax[1].spines.values():
         spine.set_edgecolor(COLOR_WA)
         spine.set_linewidth(1.75)
@@ -661,9 +633,7 @@ def plot_study_region_maps():
 
     # (b) SA region with CAFE gridlines
     ax[2] = plot_aus_map(fig, ax[2], None)
-    ax[2] = plot_shapefile(
-        ax[2], gdf_sa, COLOR_SA, facecolor=COLOR_SA, alpha=0.4, lw=1.5
-    )
+    ax[2] = plot_shapefile(ax[2], gdf_sa, COLOR_SA, facecolor=COLOR_SA, alpha=0.4, lw=1.5)
     for spine in ax[2].spines.values():
         spine.set_edgecolor(COLOR_SA)
         spine.set_linewidth(1.75)
@@ -672,8 +642,8 @@ def plot_study_region_maps():
     ax[2].set_extent(extent_sa, crs=ccrs.PlateCarree())
 
     # (b, c): Add model grid lines and legend
-    ax[1] = add_model_grid_lines(ax[1], extent_wa, ds[0], models[4], lw=0.8)
-    ax[2] = add_model_grid_lines(ax[2], extent_sa, ds[1], models[0], lw=0.8)
+    ax[1] = add_model_grid_lines(ax[1], extent_wa, ds[0], models[m_idx_1], lw=0.8)
+    ax[2] = add_model_grid_lines(ax[2], extent_sa, ds[1], models[m_idx_2], lw=0.8)
     ax[1].legend(loc="upper right", fontsize=12, framealpha=0.9)
     ax[2].legend(loc="upper right", fontsize=12, framealpha=0.9)
     ax[0].axes.set_axis_off()
@@ -778,9 +748,7 @@ if __name__ == "__main__":
                 n_times = dv.pr.time.count("time").load().item()
             else:
                 dv = gsr_data_aus_DCPP(model)
-                n_times = (~np.isnan(dv.tercile)).sum(
-                    ["init_date", "ensemble", "lead_time"]
-                )
+                n_times = (~np.isnan(dv.tercile)).sum(["init_date", "ensemble", "lead_time"])
                 n_times = n_times.max().load().item()
 
             ds_max = get_gsr_events_gridded(
@@ -824,9 +792,7 @@ if __name__ == "__main__":
 
             # Plot spatial maps for each n-year event duration
             for i, event in enumerate(evs):
-                plot_event_count(
-                    ds.isel(n=i, drop=True), dv.tercile, model, event, n_times
-                )
+                plot_event_count(ds.isel(n=i, drop=True), dv.tercile, model, event, n_times)
                 # Plot frequency n-year events (# of events per 100 years)
                 plot_frequency(ds.isel(n=i, drop=True), model, event, n_times)
                 # Maps of minimum, median, and maximum GSR during events
@@ -836,9 +802,7 @@ if __name__ == "__main__":
             plot_duration(ds_max, model, event_max)
 
             # Plot transition probability map for 1-year quantiles events
-            plot_persistance_probability(
-                dv.tercile, Events(1, operator), model, time_dim
-            )
+            plot_persistance_probability(dv.tercile, Events(1, operator), model, time_dim)
 
             # Transition probability maps for n-year events (dry, medium & wet transition maps)
             for event in [Events(i + 1, operator) for i in range(3)]:
