@@ -1,0 +1,7 @@
+# CPC (daily) required metadata changes
+
+rename:
+  precip: pr
+
+units:
+  pr: "mm day-1"

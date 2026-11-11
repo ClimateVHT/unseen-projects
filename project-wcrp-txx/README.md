@@ -21,7 +21,7 @@ Step 2: Calculate the TXx metric for a model:
 make metric-forecast MODEL=CanESM5 PROJECT_DETAILS=project-wcrp-txx/txx_config.mk MODEL_DETAILS=dataset_makefiles/CanESM5_dcppA-hindcast_config.mk OBS_DETAILS=dataset_makefiles/ERA5-tasmax_config.mk
 ```
 
-Step 3: Calculate the annual tasmax for a model:  
+Step 3: Calculate the annual climatology for a model:  
 ```
 make metric-forecast MODEL=MRI-ESM2-0 PROJECT_DETAILS=project-wcrp-txx/config_clim_tasmax.mk MODEL_DETAILS=dataset_makefiles/MRI-ESM2-0_dcppA-hindcast_config.mk OBS_DETAILS=dataset_makefiles/ERA5-tasmax_config.mk
 ```
@@ -46,14 +46,14 @@ The availability of each variable is listed below:
 
 | model | tasmax | psl | z500 | clt | prw | mrsos |
 | ---   | :-:    | :-: | :-:  | :-: | :-: | :-:   |
-| BCC-CSM2-MR | :green_circle: | :green_circle: | :yellow_circle: | :white_circle: | :white_circle: | :white_circle: |
-| CanESM5 | :green_circle: | :green_circle: | :yellow_circle: | :yellow_circle: | :white_circle: | :white_circle: |
-| CMCC-CM2-SR5 | :green_circle: | :green_circle: | :yellow_circle: | :yellow_circle: | :white_circle: | :white_circle: |
-| EC-Earth3 | :green_circle: | :green_circle: | :yellow_circle: | :yellow_circle: | :white_circle: | :white_circle: |
-| IPSL-CM6A-LR | :green_circle: | :green_circle: | :yellow_circle: | :yellow_circle: | :white_circle: | :white_circle: |
+| BCC-CSM2-MR | :green_circle: | :green_circle: | :green_circle: | :white_circle: | :white_circle: | :white_circle: |
+| CanESM5 | :green_circle: | :green_circle: | :green_circle: | :yellow_circle: | :white_circle: | :white_circle: |
+| CMCC-CM2-SR5 | :green_circle: | :green_circle: | :green_circle: | :yellow_circle: | :white_circle: | :white_circle: |
+| EC-Earth3 | :green_circle: | :green_circle: | :green_circle: | :yellow_circle: | :white_circle: | :white_circle: |
+| IPSL-CM6A-LR | :green_circle: | :green_circle: | :green_circle: | :yellow_circle: | :white_circle: | :white_circle: |
 | MIROC6 | :green_circle: | :green_circle: | :green_circle: (zg) | :white_circle: | :white_circle: | :white_circle: |
-| MPI-ESM1-2-HR | :green_circle: | :green_circle: | :yellow_circle: | :yellow_circle: | :white_circle: | :white_circle: |
+| MPI-ESM1-2-HR | :green_circle: | :green_circle: | :green_circle: | :yellow_circle: | :white_circle: | :white_circle: |
 | MRI-ESM2-0 | :green_circle: | :green_circle: | :white_circle: | :yellow_circle: | :white_circle: | :white_circle: |
-| NorCPM1 | :green_circle: | :green_circle: | :yellow_circle: | :white_circle: | :yellow_circle: | :white_circle: |
+| NorCPM1 | :green_circle: | :green_circle: | :green_circle: | :white_circle: | :yellow_circle: | :white_circle: |
 
 
